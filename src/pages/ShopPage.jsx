@@ -34,14 +34,20 @@ function Countdown({ endTs }) {
   useEffect(() => {
     const tick = () => {
       const d = endTs - Date.now();
-      if (d<=0){setT('Terminé');return;}
-      const h=Math.floor(d/3600000), m=Math.floor((d%3600000)/60000), s=Math.floor((d%60000)/1000);
+      if(d<=0){setT('Terminé');return;}
+      const h=Math.floor(d/3600000),m=Math.floor((d%3600000)/60000),s=Math.floor((d%60000)/1000);
       setT(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`);
     };
     tick(); const id=setInterval(tick,1000); return ()=>clearInterval(id);
   },[endTs]);
   return <span style={{fontFamily:'monospace',fontWeight:800,fontSize:14,color:'#fff',background:'rgba(0,0,0,0.35)',padding:'2px 8px',borderRadius:6,letterSpacing:1}}>{t}</span>;
 }
+
+const DISC_DEFAULTS = {
+  market: { name:'R.COM Market', icon:'🛒', color:'#c0392b' },
+  tech:   { name:'R.COM Tech',   icon:'💻', color:'#2980b9' },
+  delice: { name:'R.COM Délice', icon:'🍽️', color:'#e67e22' },
+};
 
 export default function ShopPage() {
   const { discId } = useParams();
@@ -50,8 +56,9 @@ export default function ShopPage() {
   const navigate = useNavigate();
   const cart = getCart(discId);
 
-  const [disc, setDisc] = useState(null);
+  const [disc, setDisc] = useState(DISC_DEFAULTS[discId] || null);
   const [articles, setArticles] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState('Tous');
   const [activeTab, setActiveTab] = useState('all');
@@ -69,25 +76,59 @@ export default function ShopPage() {
   const [previews, setPreviews] = useState([]);
   const [uploading, setUploading] = useState(false);
 
-  // Load discipline info
+  // Load discipline info from Firebase (for custom disciplines)
   useEffect(() => {
-    const DEFAULTS = {
-      market: { name:'R.COM Market', icon:'🛒', color:'#c0392b' },
-      tech:   { name:'R.COM Tech',   icon:'💻', color:'#2980b9' },
-      delice: { name:'R.COM Délice', icon:'🍽️', color:'#e67e22' },
-    };
-    if (DEFAULTS[discId]) { setDisc(DEFAULTS[discId]); return; }
+    if (DISC_DEFAULTS[discId]) { setDisc(DISC_DEFAULTS[discId]); return; }
     const r = ref(db, `disciplines/${discId}`);
-    return onValue(r, snap => { if (snap.exists()) setDisc(snap.val()); });
+    return onValue(r, snap => { if(snap.exists()) setDisc(snap.val()); });
   }, [discId]);
 
-  // Load articles for this discipline
+  // ── KEY FIX: Load articles from BOTH old path and new path ──
+  // Old path: 'articles/' (used by previous version of the app, market only)
+  // New path: 'shop/discId/articles/' (used by current version)
   useEffect(() => {
-    const r = ref(db, `shop/${discId}/articles`);
-    return onValue(r, snap => {
-      if (snap.exists()) setArticles(Object.entries(snap.val()).map(([id,v])=>({id,...v})).reverse());
-      else setArticles([]);
+    setLoading(true);
+    let oldArts = [];
+    let newArts = [];
+    let loaded = 0;
+    const totalSources = discId === 'market' ? 2 : 1;
+
+    const merge = () => {
+      loaded++;
+      const combined = [...oldArts, ...newArts];
+      const seen = new Set();
+      const deduped = combined.filter(a => {
+        if(seen.has(a.id)) return false;
+        seen.add(a.id);
+        return true;
+      });
+      deduped.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+      setArticles(deduped);
+      if(loaded >= totalSources) setLoading(false);
+    };
+
+    // Old path — only for market
+    let unsubOld = () => {};
+    if(discId === 'market') {
+      const rOld = ref(db, 'articles');
+      unsubOld = onValue(rOld, snap => {
+        oldArts = snap.exists()
+          ? Object.entries(snap.val()).map(([id,v]) => ({id,...v}))
+          : [];
+        merge();
+      });
+    }
+
+    // New path — for all disciplines
+    const rNew = ref(db, `shop/${discId}/articles`);
+    const unsubNew = onValue(rNew, snap => {
+      newArts = snap.exists()
+        ? Object.entries(snap.val()).map(([id,v]) => ({id,...v}))
+        : [];
+      merge();
     });
+
+    return () => { unsubOld(); unsubNew(); };
   }, [discId]);
 
   useEffect(() => { setCarIdx(0); }, [selected]);
@@ -96,46 +137,40 @@ export default function ShopPage() {
   const promoArts = articles.filter(a => a.isPromo && !a.isFlash && a.stock!==0);
   const categories = ['Tous', ...Array.from(new Set(articles.map(a=>a.category).filter(Boolean)))];
 
-  const base = activeTab==='flash' ? flashArts : activeTab==='promo' ? promoArts : articles;
-  const filtered = base.filter(a => {
+  const baseList = activeTab==='flash' ? flashArts : activeTab==='promo' ? promoArts : articles;
+  const filtered = baseList.filter(a => {
     const ms = !search || a.name?.toLowerCase().includes(search.toLowerCase()) || a.category?.toLowerCase().includes(search.toLowerCase());
     const mc = activeCategory==='Tous' || a.category===activeCategory;
     return ms && mc;
   });
 
-  const disc2 = (a) => (!a.oldPrice||a.oldPrice<=a.price) ? null : Math.round((1-a.price/a.oldPrice)*100);
-  const imgs = (a) => a.images?.length ? a.images : (a.imageUrl?[a.imageUrl]:[]);
-  const qty = (id) => { const i=cart.find(i=>i.article.id===id); return i?i.quantity:0; };
+  const getDiscount = (a) => (!a.oldPrice||a.oldPrice<=a.price) ? null : Math.round((1-a.price/a.oldPrice)*100);
+  const getImgs = (a) => a.images?.length ? a.images : (a.imageUrl?[a.imageUrl]:[]);
+  const getQty = (id) => { const i=cart.find(i=>i.article.id===id); return i?i.quantity:0; };
 
-  // Add to cart — requires login
   const doAdd = (art) => {
-    if (!user) {
-      setShowLoginWall(true);
-      return;
-    }
+    if(!user){ setShowLoginWall(true); return; }
     addToCart(discId, art);
   };
 
   const handleOrder = () => {
-    if (!user) { setShowCart(false); setShowLoginWall(true); return; }
+    if(!user){ setShowCart(false); setShowLoginWall(true); return; }
     const lines = cart.map(i=>`• ${i.article.name} x${i.quantity} = ${(i.article.price*i.quantity).toLocaleString()} FCFA`).join('\n');
-    const msg = `Bonjour R.COM 👋\n\nCommande sur *${disc?.name||'R.COM'}* :\n\n${lines}\n\n💰 *TOTAL : ${totalPrice(discId).toLocaleString()} FCFA*\n\nClient : ${user.displayName||user.email}`;
+    const msg = `Bonjour R.COM 👋\n\nCommande *${disc?.name||'R.COM'}* :\n\n${lines}\n\n💰 *TOTAL : ${totalPrice(discId).toLocaleString()} FCFA*\n\nClient : ${user.displayName||user.email}`;
     window.open(`https://wa.me/${WHATSAPP}?text=${encodeURIComponent(msg)}`, '_blank');
-    clearCart(discId);
-    setShowCart(false);
-    setOrderOk(true);
-    setTimeout(()=>setOrderOk(false), 4000);
+    clearCart(discId); setShowCart(false);
+    setOrderOk(true); setTimeout(()=>setOrderOk(false),4000);
   };
 
-  // Image upload
   const handleImg = async (e) => {
     const files = Array.from(e.target.files).slice(0, MAX_PHOTOS - previews.length);
     const comp = await Promise.all(files.map(f=>compress(f)));
     setPreviews(p=>[...p,...comp]);
   };
 
+  // Admin: save to NEW path always
   const handleSubmit = async () => {
-    if (!form.name.trim()||!form.price) { alert('Nom et prix obligatoires.'); return; }
+    if(!form.name.trim()||!form.price){ alert('Nom et prix obligatoires.'); return; }
     setUploading(true);
     try {
       const data = {
@@ -147,19 +182,46 @@ export default function ShopPage() {
         isPromo:!!form.isPromo, images:previews, imageUrl:previews[0]||'',
         createdAt:editId?(form.createdAt||Date.now()):Date.now(), updatedAt:Date.now(),
       };
-      const base = ref(db, `shop/${discId}/articles`);
-      if (editId) await update(ref(db,`shop/${discId}/articles/${editId}`), data);
-      else await push(base, data);
+      if(editId) {
+        // Determine which path the article is in
+        const path = form._path || `shop/${discId}/articles/${editId}`;
+        await update(ref(db, path), data);
+      } else {
+        await push(ref(db, `shop/${discId}/articles`), data);
+      }
       resetForm();
     } catch(e){ alert('Erreur : '+e.message); }
     setUploading(false);
   };
 
-  const handleDelete = async (id) => { if(window.confirm('Supprimer ?')) await remove(ref(db,`shop/${discId}/articles/${id}`)); };
-  const handleEdit = (a) => { setForm({...a,isFlash:!!a.isFlash,isPromo:!!a.isPromo,flashEnd:a.flashEnd?new Date(a.flashEnd).toISOString().slice(0,16):'',returnDays:a.returnDays||''}); setPreviews(a.images||(a.imageUrl?[a.imageUrl]:[])); setEditId(a.id); setShowForm(true); };
-  const resetForm = () => { setForm({name:'',price:'',oldPrice:'',description:'',category:'',stock:'',returnDays:'',isFlash:false,flashEnd:'',isPromo:false}); setPreviews([]); setEditId(null); setShowForm(false); };
+  const handleDelete = async (a) => {
+    if(!window.confirm('Supprimer cet article ?')) return;
+    // Try both paths
+    try { await remove(ref(db, `shop/${discId}/articles/${a.id}`)); } catch(_){}
+    try { await remove(ref(db, `articles/${a.id}`)); } catch(_){}
+  };
 
-  const color = disc?.color||'#c0392b';
+  const handleEdit = (a) => {
+    // Detect which path the article came from
+    const _path = a._path || `shop/${discId}/articles/${a.id}`;
+    setForm({...a, _path, isFlash:!!a.isFlash, isPromo:!!a.isPromo,
+      flashEnd:a.flashEnd?new Date(a.flashEnd).toISOString().slice(0,16):'',
+      returnDays:a.returnDays||''});
+    setPreviews(a.images||(a.imageUrl?[a.imageUrl]:[]));
+    setEditId(a.id); setShowForm(true);
+  };
+
+  const handleOutOfStock = async (a) => {
+    try { await update(ref(db,`shop/${discId}/articles/${a.id}`),{stock:0}); } catch(_){}
+    try { await update(ref(db,`articles/${a.id}`),{stock:0}); } catch(_){}
+  };
+
+  const resetForm = () => {
+    setForm({name:'',price:'',oldPrice:'',description:'',category:'',stock:'',returnDays:'',isFlash:false,flashEnd:'',isPromo:false});
+    setPreviews([]); setEditId(null); setShowForm(false);
+  };
+
+  const color = disc?.color || '#c0392b';
   const tItems = totalItems(discId);
   const tPrice = totalPrice(discId);
 
@@ -167,22 +229,23 @@ export default function ShopPage() {
     <div style={s.page} onClick={()=>menuOpen&&setMenuOpen(false)}>
 
       {/* ── HEADER ── */}
-      <header style={{ ...s.header, borderBottom:`3px solid ${color}` }}>
-        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+      <header style={{...s.header, borderBottom:`3px solid ${color}`}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
           <button style={s.backBtn} onClick={()=>navigate('/')}>← Univers</button>
           <RcomLogo size={32} showText={false}/>
-          <span style={{ ...s.headerTitle, color }}>{disc?.name||'Boutique'}</span>
+          <span style={{...s.headerTitle,color}}>{disc?.name||'Boutique'}</span>
         </div>
-        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
           <button style={s.cartBtn} onClick={()=>setShowCart(true)}>
             🛒{tItems>0&&<span style={s.cartBadge}>{tItems}</span>}
           </button>
           {user ? (
             <div style={{position:'relative'}}>
               <button style={s.avatarBtn} onClick={e=>{e.stopPropagation();setMenuOpen(!menuOpen);}}>
-                {user.photoURL?<img src={user.photoURL} style={s.avatar} alt=""/>:<div style={s.avatarFb}>{(user.displayName||user.email||'U')[0].toUpperCase()}</div>}
+                {user.photoURL?<img src={user.photoURL} style={s.avatar} alt=""/>
+                  :<div style={s.avatarFb}>{(user.displayName||user.email||'U')[0].toUpperCase()}</div>}
               </button>
-              {menuOpen && (
+              {menuOpen&&(
                 <div style={s.dd} onClick={e=>e.stopPropagation()}>
                   <p style={s.ddName}>{user.displayName||user.email}</p>
                   {isAdmin&&<span style={{...s.adminTag,background:color}}>⭐ Admin</span>}
@@ -191,24 +254,24 @@ export default function ShopPage() {
                 </div>
               )}
             </div>
-          ) : (
+          ):(
             <button style={{...s.loginBtn,background:color}} onClick={()=>navigate('/login')}>Connexion</button>
           )}
-          {isAdmin && <button style={{...s.addBtn,background:color}} onClick={()=>{resetForm();setShowForm(true);}}>+ Article</button>}
+          {isAdmin&&<button style={{...s.addBtn,background:color}} onClick={()=>{resetForm();setShowForm(true);}}>+ Article</button>}
         </div>
       </header>
 
-      {/* ── FLASH BANNER ── */}
-      {flashArts.length>0 && (
-        <div style={{...s.flashBanner, background:`linear-gradient(135deg,${color},${color}cc)`}}>
+      {/* ── FLASH SALES BANNER ── */}
+      {flashArts.length>0&&(
+        <div style={{...s.flashBanner,background:`linear-gradient(135deg,${color},${color}bb)`}}>
           <div style={s.flashTop}>
             <span style={s.flashTitle}>⚡ VENTES FLASH</span>
-            {flashArts[0]?.flashEnd && <Countdown endTs={flashArts[0].flashEnd}/>}
+            {flashArts[0]?.flashEnd&&<Countdown endTs={flashArts[0].flashEnd}/>}
           </div>
           <div style={s.flashScroll}>
             {flashArts.map(a=>{
-              const ii=imgs(a); const d=disc2(a);
-              return (
+              const ii=getImgs(a); const d=getDiscount(a);
+              return(
                 <div key={a.id} style={s.flashCard} onClick={()=>setSelected(a)}>
                   <div style={s.flashImgW}>
                     {ii[0]?<img src={ii[0]} style={s.flashImg} alt=""/>:<div style={s.flashImgPh}>📦</div>}
@@ -224,14 +287,14 @@ export default function ShopPage() {
         </div>
       )}
 
-      {/* ── PROMO BANNER (if promos but no flash) ── */}
-      {promoArts.length>0 && flashArts.length===0 && (
-        <div style={{...s.promoBanner, borderLeft:`4px solid ${color}`}}>
+      {/* ── PROMO BANNER ── */}
+      {promoArts.length>0&&(
+        <div style={{...s.promoBanner,borderLeft:`4px solid ${color}`}}>
           <span style={{...s.promoLabel,color}}>🏷️ PROMOTIONS EN COURS</span>
           <div style={s.flashScroll}>
             {promoArts.map(a=>{
-              const ii=imgs(a); const d=disc2(a);
-              return (
+              const ii=getImgs(a); const d=getDiscount(a);
+              return(
                 <div key={a.id} style={{...s.flashCard,background:'white',border:'1px solid #eee'}} onClick={()=>setSelected(a)}>
                   <div style={s.flashImgW}>
                     {ii[0]?<img src={ii[0]} style={s.flashImg} alt=""/>:<div style={{...s.flashImgPh,color:'#ddd',background:'#f5f5f5'}}>📦</div>}
@@ -248,24 +311,29 @@ export default function ShopPage() {
       )}
 
       {/* ── TABS ── */}
-      <div style={s.tabRow}>
-        {[
-          {k:'all',l:'🏪 Tous'},
-          ...(flashArts.length>0?[{k:'flash',l:'⚡ Flash'}]:[]),
-          ...(promoArts.length>0?[{k:'promo',l:'🏷️ Promos'}]:[]),
-        ].map(t=>(
-          <button key={t.k} style={{...s.tabBtn, borderBottom:activeTab===t.k?`3px solid ${color}`:'3px solid transparent', color:activeTab===t.k?color:'#888', fontWeight:activeTab===t.k?700:500}}
-            onClick={()=>setActiveTab(t.k)}>
-            {t.l}
-          </button>
-        ))}
-      </div>
+      {(flashArts.length>0||promoArts.length>0)&&(
+        <div style={s.tabRow}>
+          {[
+            {k:'all',l:'🏪 Tous'},
+            ...(flashArts.length>0?[{k:'flash',l:`⚡ Flash (${flashArts.length})`}]:[]),
+            ...(promoArts.length>0?[{k:'promo',l:`🏷️ Promos (${promoArts.length})`}]:[]),
+          ].map(t=>(
+            <button key={t.k} style={{...s.tabBtn,
+              borderBottom:activeTab===t.k?`3px solid ${color}`:'3px solid transparent',
+              color:activeTab===t.k?color:'#888',
+              fontWeight:activeTab===t.k?700:500}}
+              onClick={()=>setActiveTab(t.k)}>
+              {t.l}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ── SEARCH ── */}
       <div style={s.searchW}>
         <div style={s.searchBox}>
           <span style={{fontSize:18,color:'#aaa'}}>🔍</span>
-          <input style={s.searchInp} placeholder="Rechercher..." value={search} onChange={e=>setSearch(e.target.value)}/>
+          <input style={s.searchInp} placeholder="Rechercher un article..." value={search} onChange={e=>setSearch(e.target.value)}/>
           {search&&<button style={s.clearSearch} onClick={()=>setSearch('')}>✕</button>}
         </div>
       </div>
@@ -274,33 +342,46 @@ export default function ShopPage() {
       {categories.length>2&&(
         <div style={s.catRow}>
           {categories.map(c=>(
-            <button key={c} style={{...s.catBtn, background:activeCategory===c?color:'white', color:activeCategory===c?'white':'#555'}}
+            <button key={c} style={{...s.catBtn,background:activeCategory===c?color:'white',color:activeCategory===c?'white':'#555'}}
               onClick={()=>setActiveCategory(c)}>{c}</button>
           ))}
         </div>
       )}
 
       {/* ── GUEST NOTICE ── */}
-      {!user && (
+      {!user&&(
         <div style={s.guestBar}>
           👁️ Vous naviguez en tant que visiteur —
-          <button style={{...s.guestLoginBtn,color}} onClick={()=>navigate('/login')}>Connectez-vous</button>
+          <button style={{...s.guestBtn,color}} onClick={()=>navigate('/login')}>Connectez-vous</button>
           pour commander
         </div>
       )}
 
-      {/* ── GRID ── */}
-      {filtered.length===0?(
+      {/* ── LOADING ── */}
+      {loading&&(
+        <div style={{textAlign:'center',padding:'60px 20px'}}>
+          <div style={{fontSize:32,marginBottom:12}}>⏳</div>
+          <p style={{color:'#aaa'}}>Chargement des articles...</p>
+        </div>
+      )}
+
+      {/* ── ARTICLES GRID ── */}
+      {!loading&&filtered.length===0&&(
         <div style={s.empty}>
           <div style={{fontSize:52,marginBottom:12}}>{disc?.icon||'🛒'}</div>
-          <p style={{color:'#999',fontSize:16}}>{isAdmin?'Aucun article. Cliquez sur "+ Article".':'Aucun article disponible.'}</p>
+          <p style={{color:'#999',fontSize:16}}>
+            {isAdmin?'Aucun article. Cliquez sur "+ Article" pour commencer.':'Aucun article disponible pour le moment.'}
+          </p>
         </div>
-      ):(
+      )}
+
+      {!loading&&filtered.length>0&&(
         <div style={s.grid}>
           {filtered.map(a=>{
-            const ii=imgs(a); const d=disc2(a); const q=qty(a.id);
-            return (
+            const ii=getImgs(a); const d=getDiscount(a); const q=getQty(a.id);
+            return(
               <div key={a.id} style={s.card}>
+                {/* Image */}
                 <div style={s.imgW} onClick={()=>setSelected(a)}>
                   {ii[0]?<img src={ii[0]} alt={a.name} style={s.img}/>:<div style={s.imgPh}>📦</div>}
                   {ii.length>1&&<span style={s.photoCount}>📷 {ii.length}</span>}
@@ -309,6 +390,7 @@ export default function ShopPage() {
                   {a.isPromo&&!a.isFlash&&<span style={{...s.tag,background:color}}>🏷️ Promo</span>}
                   {a.stock===0&&<div style={s.outStock}>Rupture de stock</div>}
                 </div>
+                {/* Body */}
                 <div style={s.cardBody}>
                   {a.category&&<span style={{...s.catLabel,color}}>{a.category}</span>}
                   <h3 style={s.artName} onClick={()=>setSelected(a)}>{a.name}</h3>
@@ -317,9 +399,13 @@ export default function ShopPage() {
                     {a.oldPrice&&<span style={s.oldPrice}>{Number(a.oldPrice).toLocaleString()} FCFA</span>}
                   </div>
                   {a.returnDays>0&&<p style={s.returnTag}>↩️ Retour sous {a.returnDays}j</p>}
+
+                  {/* Add to cart */}
                   {a.stock!==0&&(
                     q===0?(
-                      <button style={{...s.addBtn2,background:color}} onClick={()=>doAdd(a)}>🛒 Ajouter</button>
+                      <button style={{...s.addCartBtn,background:color}} onClick={()=>doAdd(a)}>
+                        🛒 Ajouter au panier
+                      </button>
                     ):(
                       <div style={s.qtyRow}>
                         <button style={s.qtyBtn} onClick={()=>updateQuantity(discId,a.id,q-1)}>−</button>
@@ -329,11 +415,13 @@ export default function ShopPage() {
                       </div>
                     )
                   )}
+
+                  {/* Admin actions */}
                   {isAdmin&&(
                     <div style={s.adminBtns}>
-                      <button style={s.editBtn} onClick={()=>handleEdit(a)}>✏️</button>
-                      <button style={s.epuisBtn} onClick={()=>update(ref(db,`shop/${discId}/articles/${a.id}`),{stock:0})}>📦 Épuisé</button>
-                      <button style={s.delBtn2} onClick={()=>handleDelete(a.id)}>🗑️</button>
+                      <button style={s.editBtn} onClick={()=>handleEdit(a)}>✏️ Modifier</button>
+                      <button style={s.epuisBtn} onClick={()=>handleOutOfStock(a)}>📦 Épuisé</button>
+                      <button style={s.delBtn2} onClick={()=>handleDelete(a)}>🗑️</button>
                     </div>
                   )}
                 </div>
@@ -352,16 +440,15 @@ export default function ShopPage() {
 
       {/* ── DETAIL MODAL ── */}
       {selected&&(()=>{
-        const ii=imgs(selected); const d=disc2(selected); const q=qty(selected.id);
-        return (
+        const ii=getImgs(selected); const d=getDiscount(selected); const q=getQty(selected.id);
+        return(
           <div style={s.overlay} onClick={()=>setSelected(null)}>
             <div style={s.detailModal} onClick={e=>e.stopPropagation()}>
               <button style={s.closeBtn} onClick={()=>setSelected(null)}>✕</button>
 
-              {/* Badges */}
               <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
-                {selected.isFlash&&<span style={{...s.tag,position:'static',borderRadius:8,fontSize:12}}>⚡ Vente Flash</span>}
-                {selected.isPromo&&<span style={{...s.tag,position:'static',background:color,borderRadius:8,fontSize:12}}>🏷️ Promotion</span>}
+                {selected.isFlash&&<span style={{background:'#e74c3c',color:'white',fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:8}}>⚡ Vente Flash</span>}
+                {selected.isPromo&&<span style={{background:color,color:'white',fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:8}}>🏷️ Promotion</span>}
                 {selected.isFlash&&selected.flashEnd&&<Countdown endTs={selected.flashEnd}/>}
               </div>
 
@@ -385,7 +472,7 @@ export default function ShopPage() {
               <div style={s.detailPriceRow}>
                 <span style={{...s.detailPrice,color}}>{Number(selected.price).toLocaleString()} FCFA</span>
                 {selected.oldPrice&&<span style={s.oldPrice}>{Number(selected.oldPrice).toLocaleString()} FCFA</span>}
-                {d&&<span style={s.discBadge2}>-{d}%</span>}
+                {d&&<span style={{background:'#e74c3c',color:'white',fontSize:13,fontWeight:700,padding:'3px 8px',borderRadius:8}}>-{d}%</span>}
               </div>
               {selected.description&&<p style={s.detailDesc}>{selected.description}</p>}
               {selected.stock>0&&<p style={s.stockInfo}>{selected.stock>900?'✅ En stock':`📦 ${selected.stock} restant(s)`}</p>}
@@ -397,7 +484,7 @@ export default function ShopPage() {
               </div>
               {selected.stock!==0&&(
                 q===0?(
-                  <button style={{...s.addBtn2,width:'100%',padding:14,fontSize:16,marginTop:14,background:color}} onClick={()=>{doAdd(selected);if(user)setSelected(null);}}>
+                  <button style={{...s.addCartBtn,width:'100%',padding:14,fontSize:16,marginTop:14,background:color}} onClick={()=>{doAdd(selected);if(user)setSelected(null);}}>
                     🛒 Ajouter au panier
                   </button>
                 ):(
@@ -439,7 +526,7 @@ export default function ShopPage() {
                           <button style={s.remBtn} onClick={()=>removeFromCart(discId,item.article.id)}>🗑️</button>
                         </div>
                       </div>
-                      <p style={{...s.cartItemTotal,color}}>{(item.article.price*item.quantity).toLocaleString()} FCFA</p>
+                      <p style={{fontWeight:800,fontSize:15,color,whiteSpace:'nowrap'}}>{(item.article.price*item.quantity).toLocaleString()} FCFA</p>
                     </div>
                   ))}
                 </div>
@@ -450,7 +537,7 @@ export default function ShopPage() {
                   </div>
                   {user?(
                     <button style={{...s.waBtn,background:'#25D366'}} onClick={handleOrder}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="white" style={{marginRight:8}}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="white" style={{marginRight:8,flexShrink:0}}>
                         <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/>
                         <path d="M12 0C5.373 0 0 5.373 0 12c0 2.122.554 4.118 1.524 5.855L.057 23.714a.5.5 0 00.614.614l5.858-1.467A11.946 11.946 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-1.93 0-3.742-.524-5.295-1.437l-.378-.222-3.927.983.982-3.927-.222-.378A9.96 9.96 0 012 12C2 6.477 6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z"/>
                       </svg>
@@ -458,7 +545,7 @@ export default function ShopPage() {
                     </button>
                   ):(
                     <div style={s.loginWallCart}>
-                      <p style={{fontWeight:700,marginBottom:6}}>🔐 Connexion requise pour commander</p>
+                      <p style={{fontWeight:700,marginBottom:6,fontSize:15}}>🔐 Connexion requise pour commander</p>
                       <p style={{fontSize:13,color:'#888',marginBottom:12}}>Créez un compte gratuit en 30 secondes</p>
                       <button style={{...s.waBtn,background:color}} onClick={()=>navigate('/login')}>Se connecter / S'inscrire</button>
                     </div>
@@ -473,10 +560,10 @@ export default function ShopPage() {
       {/* ── LOGIN WALL ── */}
       {showLoginWall&&(
         <div style={s.overlay} onClick={()=>setShowLoginWall(false)}>
-          <div style={{...s.cartModal,maxWidth:360,borderRadius:24,padding:36,textAlign:'center'}} onClick={e=>e.stopPropagation()}>
+          <div style={{background:'white',borderRadius:24,padding:36,width:'100%',maxWidth:360,textAlign:'center'}} onClick={e=>e.stopPropagation()}>
             <div style={{fontSize:52,marginBottom:10}}>🔐</div>
             <h2 style={{fontFamily:"'Bebas Neue',cursive",fontSize:28,letterSpacing:1,marginBottom:8}}>Connexion requise</h2>
-            <p style={{color:'#666',fontSize:14,lineHeight:1.6,marginBottom:22}}>Pour ajouter un article au panier et commander, vous devez avoir un compte R.COM. C'est gratuit !</p>
+            <p style={{color:'#666',fontSize:14,lineHeight:1.6,marginBottom:22}}>Pour ajouter au panier et commander, vous devez avoir un compte R.COM. C'est <strong>gratuit</strong> !</p>
             <button style={{...s.waBtn,background:color,marginBottom:10}} onClick={()=>navigate('/login')}>Se connecter / S'inscrire</button>
             <button style={{...s.waBtn,background:'#f0f2f5',color:'#555'}} onClick={()=>setShowLoginWall(false)}>Continuer à naviguer</button>
           </div>
@@ -492,7 +579,7 @@ export default function ShopPage() {
           <div style={s.formModal}>
             <h2 style={s.formTitle}>{editId?'Modifier':'Nouvel'} Article — <span style={{color}}>{disc?.name}</span></h2>
             <div style={s.formScroll}>
-              <p style={s.photoLabel}>Photos ({previews.length}/{MAX_PHOTOS})</p>
+              <p style={s.photoLabel}>Photos ({previews.length}/{MAX_PHOTOS}) <span style={{fontWeight:400,color:'#aaa',fontSize:11}}>· 1ère = photo principale</span></p>
               <div style={s.photoGrid}>
                 {previews.map((u,i)=>(
                   <div key={i} style={s.photoCell}>
@@ -510,12 +597,12 @@ export default function ShopPage() {
                 )}
               </div>
               <input style={s.inp} placeholder="Nom de l'article *" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/>
-              <input style={s.inp} placeholder="Catégorie" value={form.category} onChange={e=>setForm({...form,category:e.target.value})}/>
-              <input style={s.inp} type="number" placeholder="Prix (FCFA) *" value={form.price} onChange={e=>setForm({...form,price:e.target.value})}/>
-              <input style={s.inp} type="number" placeholder="Ancien prix (affiche réduction)" value={form.oldPrice} onChange={e=>setForm({...form,oldPrice:e.target.value})}/>
+              <input style={s.inp} placeholder="Catégorie (ex: Électronique)" value={form.category} onChange={e=>setForm({...form,category:e.target.value})}/>
+              <input style={s.inp} type="number" placeholder="Prix en FCFA *" value={form.price} onChange={e=>setForm({...form,price:e.target.value})}/>
+              <input style={s.inp} type="number" placeholder="Ancien prix (affiche la réduction)" value={form.oldPrice} onChange={e=>setForm({...form,oldPrice:e.target.value})}/>
               <input style={s.inp} type="number" placeholder="Stock (vide = illimité)" value={form.stock} onChange={e=>setForm({...form,stock:e.target.value})}/>
               <input style={s.inp} type="number" placeholder="Jours de retour (vide = pas de retour)" value={form.returnDays} onChange={e=>setForm({...form,returnDays:e.target.value})}/>
-              <textarea style={{...s.inp,height:80,resize:'vertical'}} placeholder="Description" value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/>
+              <textarea style={{...s.inp,height:80,resize:'vertical'}} placeholder="Description de l'article" value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/>
               <div style={s.toggleRow}>
                 <label style={s.toggleLabel}><input type="checkbox" checked={!!form.isFlash} onChange={e=>setForm({...form,isFlash:e.target.checked})} style={{marginRight:8}}/>⚡ Vente Flash</label>
                 {form.isFlash&&<input style={{...s.inp,marginTop:8}} type="datetime-local" value={form.flashEnd} onChange={e=>setForm({...form,flashEnd:e.target.value})}/>}
@@ -540,7 +627,7 @@ export default function ShopPage() {
 const s = {
   page:{minHeight:'100vh',background:'#f0f2f5',paddingBottom:100},
   header:{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 16px',background:'white',boxShadow:'0 2px 12px rgba(0,0,0,0.07)',position:'sticky',top:0,zIndex:100},
-  backBtn:{background:'#f0f2f5',border:'none',borderRadius:10,padding:'7px 12px',fontSize:13,fontWeight:700,cursor:'pointer',color:'#555',fontFamily:"'Outfit',sans-serif"},
+  backBtn:{background:'#f0f2f5',border:'none',borderRadius:10,padding:'7px 12px',fontSize:13,fontWeight:700,cursor:'pointer',color:'#555',fontFamily:"'Outfit',sans-serif",whiteSpace:'nowrap'},
   headerTitle:{fontFamily:"'Bebas Neue',cursive",fontSize:20,letterSpacing:1},
   cartBtn:{position:'relative',background:'none',border:'none',fontSize:24,cursor:'pointer',padding:'4px 8px'},
   cartBadge:{position:'absolute',top:0,right:0,background:'#e74c3c',color:'white',fontSize:10,fontWeight:700,width:18,height:18,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center'},
@@ -554,8 +641,7 @@ const s = {
   ddBtn:{background:'none',border:'none',color:'#e74c3c',cursor:'pointer',fontSize:14,padding:'4px 0',width:'100%',textAlign:'left'},
   loginBtn:{border:'none',borderRadius:20,padding:'8px 16px',fontWeight:700,cursor:'pointer',color:'white',fontSize:13,fontFamily:"'Outfit',sans-serif"},
   addBtn:{color:'white',border:'none',borderRadius:10,padding:'7px 14px',fontWeight:700,cursor:'pointer',fontSize:13,fontFamily:"'Outfit',sans-serif"},
-  // Flash
-  flashBanner:{padding:'12px 16px'},
+  flashBanner:{padding:'14px 16px'},
   flashTop:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10},
   flashTitle:{color:'white',fontFamily:"'Bebas Neue',cursive",fontSize:22,letterSpacing:2},
   flashScroll:{display:'flex',gap:10,overflowX:'auto',scrollbarWidth:'none',paddingBottom:4},
@@ -567,13 +653,10 @@ const s = {
   flashName:{color:'white',fontSize:11,fontWeight:700,padding:'4px 8px 0',lineHeight:1.3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'},
   flashPrice:{color:'#ffd700',fontWeight:800,fontSize:12,padding:'2px 8px 4px'},
   flashOld:{color:'rgba(255,255,255,0.45)',fontSize:10,textDecoration:'line-through',padding:'0 8px 6px',marginTop:-4},
-  // Promo banner
   promoBanner:{background:'#fffbf0',padding:'12px 16px'},
   promoLabel:{fontFamily:"'Bebas Neue',cursive",fontSize:18,letterSpacing:1,display:'block',marginBottom:10},
-  // Tabs
   tabRow:{display:'flex',background:'white',borderBottom:'1px solid #eee'},
-  tabBtn:{flex:1,padding:'11px 0',background:'none',border:'none',cursor:'pointer',fontSize:14,fontFamily:"'Outfit',sans-serif",transition:'all 0.2s'},
-  // Search
+  tabBtn:{flex:1,padding:'11px 0',background:'none',border:'none',cursor:'pointer',fontSize:13,fontFamily:"'Outfit',sans-serif",transition:'all 0.2s'},
   searchW:{padding:'12px 16px 6px'},
   searchBox:{background:'white',borderRadius:14,padding:'10px 14px',display:'flex',alignItems:'center',gap:10,boxShadow:'0 2px 8px rgba(0,0,0,0.06)'},
   searchInp:{border:'none',outline:'none',fontSize:15,flex:1,fontFamily:"'Outfit',sans-serif"},
@@ -581,7 +664,7 @@ const s = {
   catRow:{display:'flex',gap:8,padding:'6px 16px 10px',overflowX:'auto',scrollbarWidth:'none'},
   catBtn:{border:'none',borderRadius:20,padding:'7px 16px',fontSize:13,fontWeight:600,cursor:'pointer',whiteSpace:'nowrap',fontFamily:"'Outfit',sans-serif",boxShadow:'0 2px 6px rgba(0,0,0,0.08)',flexShrink:0,transition:'all 0.2s'},
   guestBar:{background:'#fff8e1',padding:'10px 16px',fontSize:13,color:'#795548',display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'},
-  guestLoginBtn:{background:'none',border:'none',fontWeight:700,cursor:'pointer',fontSize:13,textDecoration:'underline',padding:'0 4px'},
+  guestBtn:{background:'none',border:'none',fontWeight:700,cursor:'pointer',fontSize:13,textDecoration:'underline',padding:'0 4px'},
   empty:{textAlign:'center',padding:'80px 20px'},
   grid:{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(175px,1fr))',gap:14,padding:'8px 16px',maxWidth:1200,margin:'0 auto'},
   card:{background:'white',borderRadius:18,overflow:'hidden',boxShadow:'0 4px 16px rgba(0,0,0,0.08)'},
@@ -590,7 +673,6 @@ const s = {
   imgPh:{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',fontSize:44,color:'#ddd'},
   photoCount:{position:'absolute',bottom:8,right:8,background:'rgba(0,0,0,0.55)',color:'white',fontSize:10,fontWeight:700,padding:'2px 6px',borderRadius:8},
   discBadge:{position:'absolute',top:8,left:8,background:'#e74c3c',color:'white',fontSize:11,fontWeight:700,padding:'2px 7px',borderRadius:7},
-  discBadge2:{background:'#e74c3c',color:'white',fontSize:13,fontWeight:700,padding:'3px 8px',borderRadius:8},
   tag:{position:'absolute',bottom:8,left:8,color:'white',fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:7},
   outStock:{position:'absolute',inset:0,background:'rgba(0,0,0,0.55)',display:'flex',alignItems:'center',justifyContent:'center',color:'white',fontWeight:700,fontSize:13},
   outStockBig:{background:'#e74c3c',color:'white',textAlign:'center',padding:'9px',fontSize:14,fontWeight:700,borderRadius:10,marginBottom:14},
@@ -601,13 +683,13 @@ const s = {
   price:{fontWeight:800,fontSize:15},
   oldPrice:{fontSize:12,color:'#bbb',textDecoration:'line-through'},
   returnTag:{fontSize:11,color:'#27ae60',fontWeight:600,margin:'0 0 8px'},
-  addBtn2:{width:'100%',padding:'9px',color:'white',border:'none',borderRadius:10,fontWeight:700,cursor:'pointer',fontSize:13,fontFamily:"'Outfit',sans-serif"},
+  addCartBtn:{width:'100%',padding:'9px',color:'white',border:'none',borderRadius:10,fontWeight:700,cursor:'pointer',fontSize:13,fontFamily:"'Outfit',sans-serif"},
   qtyRow:{display:'flex',alignItems:'center',gap:7},
   qtyBtn:{width:32,height:32,border:'2px solid #eee',borderRadius:8,background:'white',fontSize:18,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700},
   qtyN:{fontWeight:700,fontSize:13,minWidth:20,textAlign:'center'},
   remBtn:{background:'#fdecea',border:'none',borderRadius:8,width:32,height:32,cursor:'pointer',fontSize:13,display:'flex',alignItems:'center',justifyContent:'center'},
-  adminBtns:{display:'flex',gap:5,marginTop:8},
-  editBtn:{background:'#f0f2f5',border:'none',borderRadius:7,padding:'4px 8px',cursor:'pointer',fontSize:12},
+  adminBtns:{display:'flex',gap:5,marginTop:8,flexWrap:'wrap'},
+  editBtn:{background:'#f0f2f5',border:'none',borderRadius:7,padding:'4px 8px',cursor:'pointer',fontSize:12,fontWeight:600},
   epuisBtn:{background:'#fff3e0',border:'none',borderRadius:7,padding:'4px 7px',cursor:'pointer',fontSize:11,fontWeight:600},
   delBtn2:{background:'#fdecea',border:'none',borderRadius:7,padding:'4px 8px',cursor:'pointer',fontSize:12},
   floatingCart:{position:'fixed',bottom:20,left:'50%',transform:'translateX(-50%)',color:'white',border:'none',borderRadius:30,padding:'14px 24px',fontWeight:700,fontSize:14,cursor:'pointer',boxShadow:'0 8px 30px rgba(0,0,0,0.25)',zIndex:99,fontFamily:"'Outfit',sans-serif",whiteSpace:'nowrap'},
@@ -635,7 +717,6 @@ const s = {
   cartImg:{width:56,height:56,borderRadius:10,objectFit:'cover',flexShrink:0},
   cartItemName:{fontWeight:700,fontSize:14,marginBottom:2},
   cartItemPriceUnit:{color:'#888',fontSize:12,marginBottom:6},
-  cartItemTotal:{fontWeight:800,fontSize:15,whiteSpace:'nowrap'},
   cartFooter:{padding:'14px 24px 24px',borderTop:'1px solid #f0f2f5'},
   totalRow:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14},
   loginWallCart:{background:'#fff8f0',borderRadius:12,padding:16,textAlign:'center',marginBottom:12,border:'1px solid #fde0c0'},

@@ -5,6 +5,7 @@ import { CartProvider } from './context/CartContext';
 import LoginPage from './pages/LoginPage';
 import HomePage from './pages/HomePage';
 import ShopPage from './pages/ShopPage';
+import InstallBanner from './components/InstallBanner';
 
 export default function App() {
   return (
@@ -12,12 +13,12 @@ export default function App() {
       <CartProvider>
         <BrowserRouter>
           <Routes>
-            {/* PUBLIC - no login needed */}
             <Route path="/" element={<HomePage />} />
             <Route path="/shop/:discId" element={<ShopPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          <InstallBanner />
         </BrowserRouter>
       </CartProvider>
     </AuthProvider>
