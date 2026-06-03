@@ -1,27 +1,28 @@
 import React, { useState } from 'react';
 import { auth, googleProvider, db } from '../firebase';
 import { signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword, updateProfile } from 'firebase/auth';
-import { ref, set } from 'firebase/database';
+import { ref, update } from 'firebase/database';
 import { useNavigate } from 'react-router-dom';
 import RcomLogo from '../components/RcomLogo';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const [mode, setMode] = useState('login');
-  const [email, setEmail] = useState('');
+  const [mode, setMode]       = useState('login');
+  const [email, setEmail]     = useState('');
   const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
-  const [error, setError] = useState('');
+  const [name, setName]       = useState('');
+  const [error, setError]     = useState('');
   const [loading, setLoading] = useState(false);
 
-  // where to redirect after login
   const returnTo = new URLSearchParams(window.location.search).get('returnTo') || '/';
 
+  // ⚠️ update() au lieu de set() pour ne PAS écraser partnerPermission existante
   const saveUser = async (user, extra = {}) => {
-    await set(ref(db, `users/${user.uid}`), {
+    await update(ref(db, `users/${user.uid}`), {
       name: user.displayName || extra.name || '',
       email: user.email || '',
-      createdAt: Date.now(),
+      photoURL: user.photoURL || '',
+      lastSeen: Date.now(),
     });
   };
 
@@ -43,7 +44,8 @@ export default function LoginPage() {
         await updateProfile(res.user, { displayName: name });
         await saveUser(res.user, { name });
       } else {
-        await signInWithEmailAndPassword(auth, email, password);
+        const res = await signInWithEmailAndPassword(auth, email, password);
+        await saveUser(res.user);
       }
       navigate(returnTo, { replace: true });
     } catch (e) {
