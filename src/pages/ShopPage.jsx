@@ -51,8 +51,14 @@ const DISC_DEFAULTS = {
 
 export default function ShopPage() {
   const { discId } = useParams();
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, isPartner, partnerData } = useAuth();
   const { getCart, addToCart, removeFromCart, updateQuantity, clearCart, totalItems, totalPrice } = useCart();
+  // Peut modifier les articles : admin toujours, partenaire seulement sur SON univers
+  const canEdit = isAdmin || (isPartner && partnerData?.discId === discId);
+  // Quota partenaire
+  const partnerMax    = partnerData?.maxArticles || 20;
+  const partnerCount  = articles.filter(a => a._ownerId === user?.uid).length;
+  const partnerAtLimit = isPartner && !isAdmin && partnerCount >= partnerMax;
   const navigate = useNavigate();
   const cart = getCart(discId);
 
@@ -187,7 +193,9 @@ export default function ShopPage() {
         const path = form._path || `shop/${discId}/articles/${editId}`;
         await update(ref(db, path), data);
       } else {
-        await push(ref(db, `shop/${discId}/articles`), data);
+        // Partenaire : on stocke son uid pour le comptage
+      const finalData = isPartner ? { ...data, _ownerId: user.uid } : data;
+      await push(ref(db, `shop/${discId}/articles`), finalData);
       }
       resetForm();
     } catch(e){ alert('Erreur : '+e.message); }
@@ -195,6 +203,10 @@ export default function ShopPage() {
   };
 
   const handleDelete = async (a) => {
+    if (isPartner && !isAdmin && a._ownerId !== user?.uid) {
+      alert("Vous ne pouvez pas supprimer les articles de l'admin.");
+      return;
+    }
     if(!window.confirm('Supprimer cet article ?')) return;
     // Try both paths
     try { await remove(ref(db, `shop/${discId}/articles/${a.id}`)); } catch(_){}
@@ -202,6 +214,11 @@ export default function ShopPage() {
   };
 
   const handleEdit = (a) => {
+    // Partenaire ne peut pas modifier les articles de l'admin
+    if (isPartner && !isAdmin && a._ownerId !== user?.uid) {
+      alert("Vous ne pouvez pas modifier les articles de l'admin.");
+      return;
+    }
     // Detect which path the article came from
     const _path = a._path || `shop/${discId}/articles/${a.id}`;
     setForm({...a, _path, isFlash:!!a.isFlash, isPromo:!!a.isPromo,
@@ -249,6 +266,7 @@ export default function ShopPage() {
                 <div style={s.dd} onClick={e=>e.stopPropagation()}>
                   <p style={s.ddName}>{user.displayName||user.email}</p>
                   {isAdmin&&<span style={{...s.adminTag,background:color}}>⭐ Admin</span>}
+                  {isPartner&&<span style={{...s.adminTag,background:'#27ae60'}}>🤝 Partenaire</span>}
                   <hr style={s.hr}/>
                   <button style={s.ddBtn} onClick={()=>signOut(auth)}>🚪 Déconnexion</button>
                 </div>
@@ -257,7 +275,7 @@ export default function ShopPage() {
           ):(
             <button style={{...s.loginBtn,background:color}} onClick={()=>navigate('/login')}>Connexion</button>
           )}
-          {isAdmin&&<button style={{...s.addBtn,background:color}} onClick={()=>{resetForm();setShowForm(true);}}>+ Article</button>}
+          {canEdit&&<button style={{...s.addBtn,background:color}} onClick={()=>{if(partnerAtLimit){alert(`Quota atteint (${partnerMax} articles). Contactez l'admin pour augmenter votre limite.`);return;}resetForm();setShowForm(true);}}>+ Article</button>}
         </div>
       </header>
 
@@ -417,7 +435,7 @@ export default function ShopPage() {
                   )}
 
                   {/* Admin actions */}
-                  {isAdmin&&(
+                  {canEdit&&(
                     <div style={s.adminBtns}>
                       <button style={s.editBtn} onClick={()=>handleEdit(a)}>✏️ Modifier</button>
                       <button style={s.epuisBtn} onClick={()=>handleOutOfStock(a)}>📦 Épuisé</button>
@@ -574,10 +592,15 @@ export default function ShopPage() {
       {orderOk&&<div style={s.toast}>✅ Commande envoyée sur WhatsApp !</div>}
 
       {/* ── ADMIN FORM ── */}
-      {isAdmin&&showForm&&(
+      {canEdit&&showForm&&(
         <div style={s.overlay}>
           <div style={s.formModal}>
             <h2 style={s.formTitle}>{editId?'Modifier':'Nouvel'} Article — <span style={{color}}>{disc?.name}</span></h2>
+            {isPartner && !isAdmin && (
+              <p style={{fontSize:13,color:'#888',marginBottom:10}}>
+                📦 {partnerCount} / {partnerMax} articles utilisés
+              </p>
+            )}
             <div style={s.formScroll}>
               <p style={s.photoLabel}>Photos ({previews.length}/{MAX_PHOTOS}) <span style={{fontWeight:400,color:'#aaa',fontSize:11}}>· 1ère = photo principale</span></p>
               <div style={s.photoGrid}>
