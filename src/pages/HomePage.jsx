@@ -13,13 +13,13 @@ const DEFAULTS = [
 ];
 
 export default function HomePage() {
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, isPartner, partnerData } = useAuth();
   const navigate = useNavigate();
   const [disciplines, setDisciplines] = useState(DEFAULTS);
-  const [showAdd, setShowAdd] = useState(false);
-  const [nd, setNd] = useState({ name:'', icon:'', color:'#c0392b', description:'' });
+  const [showAdd, setShowAdd]   = useState(false);
+  const [nd, setNd]             = useState({ name:'', icon:'', color:'#c0392b', description:'' });
   const [menuOpen, setMenuOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving]     = useState(false);
 
   useEffect(() => {
     const r = ref(db, 'disciplines');
@@ -70,6 +70,9 @@ export default function HomePage() {
     if (disc.available) navigate(`/shop/${disc.fbKey || disc.id}`);
   };
 
+  // Univers du partenaire connecté
+  const partnerDiscId = partnerData?.discId;
+
   return (
     <div style={s.page} onClick={() => menuOpen && setMenuOpen(false)}>
       {/* HEADER */}
@@ -87,8 +90,19 @@ export default function HomePage() {
               {menuOpen && (
                 <div style={s.dd} onClick={e => e.stopPropagation()}>
                   <p style={s.ddName}>{user.displayName||user.email}</p>
-                  {isAdmin && <span style={s.adminTag}>⭐ Admin</span>}
+                  {isAdmin   && <span style={s.adminTag}>⭐ Admin</span>}
+                  {isPartner && <span style={{...s.adminTag, background:'#27ae60'}}>🤝 Partenaire</span>}
                   <hr style={s.hr}/>
+                  {isAdmin && (
+                    <button style={{...s.ddBtn, color:'#c0392b', fontWeight:700}} onClick={() => { setMenuOpen(false); navigate('/admin'); }}>
+                      👑 Panel Admin
+                    </button>
+                  )}
+                  {isPartner && partnerDiscId && (
+                    <button style={{...s.ddBtn, color:'#27ae60', fontWeight:700}} onClick={() => { setMenuOpen(false); navigate(`/shop/${partnerDiscId}`); }}>
+                      🏪 Mon Univers
+                    </button>
+                  )}
                   <button style={s.ddBtn} onClick={() => signOut(auth)}>🚪 Déconnexion</button>
                 </div>
               )}
@@ -103,7 +117,8 @@ export default function HomePage() {
       <div style={s.hero}>
         <h1 style={s.heroT}>Bienvenue sur <span style={s.heroS}>R.COM</span></h1>
         <p style={s.heroSub}>Choisissez votre univers pour découvrir nos offres</p>
-        {isAdmin && <p style={s.adminHint}>👑 Mode admin — tu peux activer / désactiver chaque univers</p>}
+        {isAdmin   && <p style={s.adminHint}>👑 Mode admin — tu peux activer / désactiver chaque univers</p>}
+        {isPartner && <p style={{...s.adminHint, background:'#e8f8e8', color:'#27ae60'}}>🤝 Partenaire — gère ton univers depuis la boutique</p>}
       </div>
 
       {/* UNIVERSES GRID */}
@@ -119,6 +134,10 @@ export default function HomePage() {
               <span style={{ ...s.badge, background: d.available ? (d.color||'#27ae60') : '#bbb' }}>
                 {d.available ? '✅ Disponible' : '🔒 Bientôt'}
               </span>
+              {/* Badge "Mon Univers" pour le partenaire */}
+              {isPartner && (d.fbKey === partnerDiscId || d.id === partnerDiscId) && (
+                <span style={{ ...s.badge, background:'#27ae60', marginLeft:6 }}>🤝 Mon Univers</span>
+              )}
             </div>
             {isAdmin && (
               <div style={s.adminRow}>
@@ -154,7 +173,7 @@ export default function HomePage() {
             <label style={{ fontSize:13, color:'#666', marginBottom:6, display:'block' }}>Couleur</label>
             <input type="color" value={nd.color} onChange={e=>setNd({...nd,color:e.target.value})}
               style={{ width:56, height:36, border:'none', cursor:'pointer', marginBottom:16, borderRadius:8 }}/>
-            <p style={{ fontSize:12, color:'#aaa', marginBottom:14 }}>Sera désactivé par défaut. Tu pourras l'activer depuis l'accueil.</p>
+            <p style={{ fontSize:12, color:'#aaa', marginBottom:14 }}>Sera désactivé par défaut.</p>
             <div style={{ display:'flex', gap:10 }}>
               <button style={s.saveBtn} onClick={addDisc} disabled={saving}>Ajouter</button>
               <button style={s.cancelBtn} onClick={() => setShowAdd(false)}>Annuler</button>
@@ -192,7 +211,7 @@ const s = {
   adminRow:{ display:'flex', gap:8, marginTop:14, justifyContent:'center' },
   toggleBtn:{ border:'none', borderRadius:10, padding:'8px 14px', fontSize:13, fontWeight:700, cursor:'pointer', fontFamily:"'Outfit',sans-serif", flex:1 },
   delBtn:{ background:'#fdecea', border:'none', borderRadius:10, padding:'8px 10px', cursor:'pointer', fontSize:15 },
-  addCard:{ border:'2px dashed #ddd', borderRadius:22, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', cursor:'pointer', minHeight:220, background:'transparent', transition:'background 0.2s' },
+  addCard:{ border:'2px dashed #ddd', borderRadius:22, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', cursor:'pointer', minHeight:220, background:'transparent' },
   overlay:{ position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:300, padding:20 },
   modal:{ background:'white', borderRadius:22, padding:32, width:'90%', maxWidth:400 },
   modalT:{ fontFamily:"'Bebas Neue',cursive", fontSize:26, letterSpacing:1, marginBottom:18 },
