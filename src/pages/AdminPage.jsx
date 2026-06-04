@@ -91,8 +91,7 @@ export default function AdminPage() {
   };
 
   const deleteDisc = async (disc) => {
-    if (disc.isDefault) { alert('Impossible de supprimer un univers par défaut.'); return; }
-    if (!window.confirm(`Supprimer "${disc.name}" ?`)) return;
+    if (!window.confirm(`Supprimer l'univers "${disc.name}" ? Cette action est irréversible.`)) return;
     await remove(ref(db, `disciplines/${disc.fbKey}`));
   };
 
@@ -235,10 +234,8 @@ export default function AdminPage() {
                         onClick={() => toggleDisc(d)}>
                         {d.available ? '🔴 Désactiver' : '🟢 Activer'}
                       </button>
-                      {!d.isDefault && (
-                        <button style={{...s.univBtn, background:'#fdecea', color:'#c0392b'}}
-                          onClick={() => deleteDisc(d)}>🗑️ Supprimer</button>
-                      )}
+                      <button style={{...s.univBtn, background:'#fdecea', color:'#c0392b'}}
+                        onClick={() => deleteDisc(d)}>🗑️ Supprimer</button>
                     </div>
                   </div>
                 </div>
