@@ -53,17 +53,18 @@ export default function ShopPage() {
   const { discId } = useParams();
   const { user, isAdmin, isPartner, partnerData } = useAuth();
   const { getCart, addToCart, removeFromCart, updateQuantity, clearCart, totalItems, totalPrice } = useCart();
-  // Peut modifier les articles : admin toujours, partenaire seulement sur SON univers
-  const canEdit = isAdmin || (isPartner && partnerData?.discId === discId);
-  // Quota partenaire
-  const partnerMax    = partnerData?.maxArticles || 20;
-  const partnerCount  = articles.filter(a => a._ownerId === user?.uid).length;
-  const partnerAtLimit = isPartner && !isAdmin && partnerCount >= partnerMax;
   const navigate = useNavigate();
   const cart = getCart(discId);
 
   const [disc, setDisc] = useState(DISC_DEFAULTS[discId] || null);
   const [articles, setArticles] = useState([]);
+
+  // Peut modifier les articles : admin toujours, partenaire seulement sur SON univers
+  const canEdit = isAdmin || (isPartner && partnerData?.discId === discId);
+  // Quota partenaire (calculé après articles)
+  const partnerMax     = partnerData?.maxArticles || 20;
+  const partnerCount   = articles.filter(a => a._ownerId === user?.uid).length;
+  const partnerAtLimit = isPartner && !isAdmin && partnerCount >= partnerMax;
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState('Tous');
@@ -89,56 +90,49 @@ export default function ShopPage() {
     return onValue(r, snap => { if(snap.exists()) setDisc(snap.val()); });
   }, [discId]);
 
-  // Charge articles depuis les deux chemins :
-  // - 'articles/' = anciens articles R.COM Market (path hérité)
-  // - 'shop/{discId}/articles/' = nouveau chemin pour tous les univers
-  // On détecte si c'est Market via disc.id === 'market' (champ dans Firebase)
+  // Charge articles depuis LES DEUX chemins simultanément :
+  // - 'articles/'               = anciens articles (chemin hérité, R.COM Market)
+  // - 'shop/{discId}/articles/' = nouveau chemin universel
+  // On charge toujours les deux car on ne peut pas détecter si fbKey = "market"
   useEffect(() => {
     setLoading(true);
     let oldArts = [];
     let newArts = [];
-    let loaded = 0;
-
-    const isMarket = disc?.id === 'market' || discId === 'market';
-    const totalSources = isMarket ? 2 : 1;
+    let loaded  = 0;
+    const TOTAL = 2;
 
     const merge = () => {
       loaded++;
       const combined = [...oldArts, ...newArts];
       const seen = new Set();
       const deduped = combined.filter(a => {
-        if(seen.has(a.id)) return false;
+        if (seen.has(a.id)) return false;
         seen.add(a.id);
         return true;
       });
-      deduped.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+      deduped.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
       setArticles(deduped);
-      if(loaded >= totalSources) setLoading(false);
+      if (loaded >= TOTAL) setLoading(false);
     };
 
-    // Ancien chemin hérité — uniquement pour R.COM Market
-    let unsubOld = () => {};
-    if(isMarket) {
-      const rOld = ref(db, 'articles');
-      unsubOld = onValue(rOld, snap => {
-        oldArts = snap.exists()
-          ? Object.entries(snap.val()).map(([id,v]) => ({id,...v,_path:`articles/${id}`}))
-          : [];
-        merge();
-      });
-    }
+    // Chemin hérité — articles/
+    const unsubOld = onValue(ref(db, 'articles'), snap => {
+      oldArts = snap.exists()
+        ? Object.entries(snap.val()).map(([id, v]) => ({ id, ...v, _legacyPath: true }))
+        : [];
+      merge();
+    });
 
-    // Nouveau chemin — tous les univers
-    const rNew = ref(db, `shop/${discId}/articles`);
-    const unsubNew = onValue(rNew, snap => {
+    // Nouveau chemin — shop/{discId}/articles/
+    const unsubNew = onValue(ref(db, `shop/${discId}/articles`), snap => {
       newArts = snap.exists()
-        ? Object.entries(snap.val()).map(([id,v]) => ({id,...v,_path:`shop/${discId}/articles/${id}`}))
+        ? Object.entries(snap.val()).map(([id, v]) => ({ id, ...v }))
         : [];
       merge();
     });
 
     return () => { unsubOld(); unsubNew(); };
-  }, [discId, disc?.id]);
+  }, [discId]);
 
   useEffect(() => { setCarIdx(0); }, [selected]);
 
@@ -210,6 +204,8 @@ export default function ShopPage() {
       alert("Vous ne pouvez pas supprimer les articles de l'admin.");
       return;
     }
+    // Utilise le chemin hérité si l'article vient de 'articles/'
+    const artPath = a._legacyPath ? `articles/${a.id}` : `shop/${discId}/articles/${a.id}`;
     if(!window.confirm('Supprimer cet article ?')) return;
     // Try both paths
     try { await remove(ref(db, `shop/${discId}/articles/${a.id}`)); } catch(_){}
