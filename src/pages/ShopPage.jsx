@@ -89,15 +89,18 @@ export default function ShopPage() {
     return onValue(r, snap => { if(snap.exists()) setDisc(snap.val()); });
   }, [discId]);
 
-  // ── KEY FIX: Load articles from BOTH old path and new path ──
-  // Old path: 'articles/' (used by previous version of the app, market only)
-  // New path: 'shop/discId/articles/' (used by current version)
+  // Charge articles depuis les deux chemins :
+  // - 'articles/' = anciens articles R.COM Market (path hérité)
+  // - 'shop/{discId}/articles/' = nouveau chemin pour tous les univers
+  // On détecte si c'est Market via disc.id === 'market' (champ dans Firebase)
   useEffect(() => {
     setLoading(true);
     let oldArts = [];
     let newArts = [];
     let loaded = 0;
-    const totalSources = discId === 'market' ? 2 : 1;
+
+    const isMarket = disc?.id === 'market' || discId === 'market';
+    const totalSources = isMarket ? 2 : 1;
 
     const merge = () => {
       loaded++;
@@ -113,29 +116,29 @@ export default function ShopPage() {
       if(loaded >= totalSources) setLoading(false);
     };
 
-    // Old path — only for market
+    // Ancien chemin hérité — uniquement pour R.COM Market
     let unsubOld = () => {};
-    if(discId === 'market') {
+    if(isMarket) {
       const rOld = ref(db, 'articles');
       unsubOld = onValue(rOld, snap => {
         oldArts = snap.exists()
-          ? Object.entries(snap.val()).map(([id,v]) => ({id,...v}))
+          ? Object.entries(snap.val()).map(([id,v]) => ({id,...v,_path:`articles/${id}`}))
           : [];
         merge();
       });
     }
 
-    // New path — for all disciplines
+    // Nouveau chemin — tous les univers
     const rNew = ref(db, `shop/${discId}/articles`);
     const unsubNew = onValue(rNew, snap => {
       newArts = snap.exists()
-        ? Object.entries(snap.val()).map(([id,v]) => ({id,...v}))
+        ? Object.entries(snap.val()).map(([id,v]) => ({id,...v,_path:`shop/${discId}/articles/${id}`}))
         : [];
       merge();
     });
 
     return () => { unsubOld(); unsubNew(); };
-  }, [discId]);
+  }, [discId, disc?.id]);
 
   useEffect(() => { setCarIdx(0); }, [selected]);
 
